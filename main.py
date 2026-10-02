@@ -1,4 +1,5 @@
 import os
+import subprocess
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -25,7 +26,6 @@ class ScrapeRequest(BaseModel):
 def home():
     return {"message": "API ScrapeGraphAI está online!"}
 
-# Nota: Removido o 'async' para o FastAPI gerenciar a chamada bloqueante em uma thread isolada
 @app.post("/scrape")
 def scrape_site(request: ScrapeRequest):
     api_key = os.getenv("OPENAI_API_KEY")
@@ -57,4 +57,18 @@ def scrape_site(request: ScrapeRequest):
         result = smart_scraper.run()
         return {"success": True, "data": result}
     except Exception as e:
+        # Se falhar por falta do executável do Playwright, tenta instalar e reexecutar
+        if "Executable doesn't exist" in str(e) or "playwright install" in str(e):
+            try:
+                subprocess.run(["python", "-m", "playwright", "install", "chromium"], check=True)
+                smart_scraper = SmartScraperGraph(
+                    prompt=request.prompt,
+                    source=source_url,
+                    config=graph_config
+                )
+                result = smart_scraper.run()
+                return {"success": True, "data": result}
+            except Exception as retry_err:
+                raise HTTPException(status_code=500, detail=f"Erro ao instalar Playwright e rodar: {str(retry_err)}")
+        
         raise HTTPException(status_code=500, detail=str(e))
