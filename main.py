@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from scrapegraphai.graphs import SmartScraperGraph
-from ddgs import DDGS
+from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -27,52 +27,70 @@ class ScrapeRequest(BaseModel):
 
 @app.get("/")
 def home():
-    return {"message": "API ScrapeGraphAI Online (100% Gratuita)"}
+    return {"message": "API ScrapeGraphAI Online (100% Gratuita via Playwright)"}
 
-def buscar_urls_gratuitas(termo: str) -> list:
+def buscar_urls_com_playwright(termo: str) -> list:
     targets = []
-    # Lista de domínios que não são sites diretos das empresas
     dominios_ignorados = [
         "google.com", "instagram.com", "facebook.com", "linkedin.com",
         "youtube.com", "wikipedia.org", "duckduckgo.com", "twitter.com",
-        "x.com", "pinterest.com", "tiktok.com"
+        "x.com", "pinterest.com", "tiktok.com", "tripadvisor.com"
     ]
     
-    # Fazemos a busca com regionalização para o Brasil (br-pt)
-    with DDGS() as ddgs_client:
-        # Busca 15 resultados para ter margem de filtro
-        resultados = list(ddgs_client.text(f"{termo} contato", region="br-pt", max_results=15))
+    query = termo.replace(" ", "+")
+    search_url = f"https://html.duckduckgo.com/html/?q={query}"
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
         
-        for item in resultados:
-            link = item.get("href", "")
-            if link and not any(domain in link for domain in dominios_ignorados):
-                targets.append(link)
-            if len(targets) >= 3:
-                break
+        # Seleciona os links dos resultados orgânicos do DuckDuckGo HTML
+        links = page.locator("a.result__url").all()
+        
+        for link_elem in links:
+            href = link_elem.get_attribute("href")
+            if href:
+                # O DuckDuckGo HTML encapsula o link real no parâmetro 'uddg'
+                if "uddg=" in href:
+                    import urllib.parse
+                    parsed = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+                    real_url = parsed.get("uddg", [""])[0]
+                else:
+                    real_url = href
                 
+                if real_url and real_url.startswith("http") and not any(d in real_url for d in dominios_ignorados):
+                    if real_url not in targets:
+                        targets.append(real_url)
+                
+                if len(targets) >= 3:
+                    break
+        
+        browser.close()
+
     return targets
 
 @app.post("/scrape")
 def scrape_site(request: ScrapeRequest):
     openai_key = os.getenv("OPENAI_API_KEY")
     if not openai_key:
-        raise HTTPException(status_code=500, detail="Chave OPENAI_API_KEY não configurada.")
+        raise HTTPException(status_code=500, detail="Chave OPENAI_API_KEY não configurada no servidor.")
 
     targets = []
 
-    # ETAPA 1: Identificar se é uma URL direta ou termo de busca
+    # ETAPA 1: Se for um termo de busca (sem http/https), busca as URLs reais usando Playwright
     if not request.url.startswith("http://") and not request.url.startswith("https://"):
         try:
-            targets = buscar_urls_gratuitas(request.url)
+            targets = buscar_urls_com_playwright(request.url)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Erro ao buscar sites no DuckDuckGo: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Erro na busca Playwright: {str(e)}")
     else:
         targets.append(request.url)
 
     if not targets:
-        raise HTTPException(status_code=404, detail="Nenhum site oficial foi encontrado para o termo pesquisado.")
+        raise HTTPException(status_code=404, detail="Nenhum site oficial foi encontrado para o termo informado.")
 
-    # ETAPA 2: Extração via ScrapeGraphAI nos sites encontrados
+    # ETAPA 2: Processamento e raspagem no ScrapeGraphAI
     all_leads = []
 
     prompt_detalhado = (
@@ -108,7 +126,6 @@ def scrape_site(request: ScrapeRequest):
                 result["website"] = site_url
                 all_leads.append(result)
         except Exception as e:
-            # Tratamento para garantir a instalação do navegador Playwright se necessário
             if "Executable doesn't exist" in str(e) or "playwright install" in str(e):
                 subprocess.run(["playwright", "install", "chromium"], check=True)
                 smart_scraper = SmartScraperGraph(

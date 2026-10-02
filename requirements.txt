@@ -4,4 +4,3 @@ scrapegraphai
 pydantic
 python-dotenv
 playwright
-ddgs
