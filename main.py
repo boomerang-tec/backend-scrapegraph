@@ -31,6 +31,13 @@ async def scrape_site(request: ScrapeRequest):
     if not api_key:
         raise HTTPException(status_code=500, detail="Chave OPENAI_API_KEY não configurada no servidor.")
 
+    # Se a entrada não for uma URL (http/https), transforma em busca no Google Maps
+    if not request.url.startswith("http://") and not request.url.startswith("https://"):
+        termo_busca = request.url.replace(" ", "+")
+        source_url = f"https://www.google.com/maps/search/{termo_busca}"
+    else:
+        source_url = request.url
+
     graph_config = {
         "llm": {
             "api_key": api_key,
@@ -43,7 +50,7 @@ async def scrape_site(request: ScrapeRequest):
     try:
         smart_scraper = SmartScraperGraph(
             prompt=request.prompt,
-            source=request.url,
+            source=source_url,
             config=graph_config
         )
         result = smart_scraper.run()
