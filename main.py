@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from scrapegraphai.graphs import SmartScraperGraph
+from googlesearch import search
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -26,7 +27,7 @@ class ScrapeRequest(BaseModel):
 
 @app.get("/")
 def home():
-    return {"message": "API ScrapeGraphAI está online!"}
+    return {"message": "API ScrapeGraphAI em 2 Etapas está online!"}
 
 @app.post("/scrape")
 def scrape_site(request: ScrapeRequest):
@@ -34,25 +35,42 @@ def scrape_site(request: ScrapeRequest):
     if not api_key:
         raise HTTPException(status_code=500, detail="Chave OPENAI_API_KEY não configurada no servidor.")
 
-    # Se a entrada for termo de busca/nicho, direciona para a pesquisa
-    if not request.url.startswith("http://") and not request.url.startswith("https://"):
-        termo_busca = request.url.replace(" ", "+")
-        source_url = f"https://www.google.com/maps/search/{termo_busca}"
-    else:
-        source_url = request.url
+    targets = []
 
-    # Prompt otimizado para enriquecimento de Leads
+    # ETAPA 1: Se for termo de busca/nicho, pesquisa no Google e obtém os links dos sites oficiais
+    if not request.url.startswith("http://") and not request.url.startswith("https://"):
+        try:
+            # Busca os 3 primeiros sites reais no Google (evitando agregadores genéricos)
+            query = f"{request.url} site oficial"
+            search_results = search(query, num_results=5, lang="pt")
+            
+            for url_found in search_results:
+                # Ignora redes sociais ou sites de busca genéricos
+                if not any(domain in url_found for domain in ["google.com", "instagram.com", "facebook.com", "linkedin.com", "youtube.com"]):
+                    targets.append(url_found)
+                if len(targets) >= 3: # Limita aos 3 primeiros sites para não estourar o tempo de resposta
+                    break
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Erro ao buscar sites no Google: {str(e)}")
+    else:
+        targets.append(request.url)
+
+    if not targets:
+        raise HTTPException(status_code=404, detail="Nenhum site oficial foi encontrado para este termo de busca.")
+
+    # ETAPA 2: Para cada site encontrado, roda o ScrapeGraphAI na URL
+    all_leads = []
+    
     prompt_detalhado = (
         f"{request.prompt}\n\n"
-        "Extraia todos os estabelecimentos/empresas encontrados na página. "
-        "Para cada empresa, identifique rigorosamente os seguintes campos no formato JSON:\n"
-        "- nome_empresa: Nome do estabelecimento\n"
-        "- telefone: Número de telefone ou WhatsApp de contato com DDD\n"
-        "- email: Endereço de e-mail (se disponível)\n"
-        "- endereco: Endereço completo ou bairro/cidade\n"
-        "- responsavel: Nome do proprietário, diretor, gestor ou contato principal (se mencionado)\n"
-        "- website: URL do site oficial da empresa (se disponível)\n"
-        "Retorne APENAS um array de objetos JSON contendo essas informações."
+        "Análise o site corporativo e extraia as seguintes informações no formato JSON:\n"
+        "- nome_empresa: Nome oficial da empresa\n"
+        "- telefone: Telefone fixo, celular ou WhatsApp de contato\n"
+        "- email: E-mail corporativo ou de contato/atendimento encontrado no site\n"
+        "- endereco: Endereço físico da empresa (rua, bairro, cidade)\n"
+        "- responsavel: Nome do diretor, fundador, sócio ou gestor (se mencionado na página sobre/equipe)\n"
+        "- website: A própria URL do site que foi analisado\n"
+        "Retorne APENAS um objeto JSON com esses campos."
     )
 
     graph_config = {
@@ -64,28 +82,29 @@ def scrape_site(request: ScrapeRequest):
         "headless": True,
     }
 
-    try:
-        smart_scraper = SmartScraperGraph(
-            prompt=prompt_detalhado,
-            source=source_url,
-            config=graph_config
-        )
-        result = smart_scraper.run()
-        
-        # Garante o envio de uma estrutura consistente para o Lovable
-        return {"success": True, "leads": result}
-    except Exception as e:
-        if "Executable doesn't exist" in str(e) or "playwright install" in str(e):
-            try:
+    for site_url in targets:
+        try:
+            smart_scraper = SmartScraperGraph(
+                prompt=prompt_detalhado,
+                source=site_url,
+                config=graph_config
+            )
+            result = smart_scraper.run()
+            if result:
+                if isinstance(result, dict):
+                    result["website"] = site_url
+                all_leads.append(result)
+        except Exception as e:
+            # Caso falhe o navegador em algum site, tenta reinstalar Chromium se necessário
+            if "Executable doesn't exist" in str(e) or "playwright install" in str(e):
                 subprocess.run(["playwright", "install", "chromium"], check=True)
                 smart_scraper = SmartScraperGraph(
                     prompt=prompt_detalhado,
-                    source=source_url,
+                    source=site_url,
                     config=graph_config
                 )
                 result = smart_scraper.run()
-                return {"success": True, "leads": result}
-            except Exception as retry_err:
-                raise HTTPException(status_code=500, detail=f"Erro ao reinstalar Chromium: {str(retry_err)}")
-        
-        raise HTTPException(status_code=500, detail=str(e))
+                if result:
+                    all_leads.append(result)
+
+    return {"success": True, "total": len(all_leads), "leads": all_leads}

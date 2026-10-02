@@ -4,3 +4,4 @@ scrapegraphai
 pydantic
 python-dotenv
 playwright
+googlesearch-python
