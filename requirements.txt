@@ -4,3 +4,5 @@ scrapegraphai
 pydantic
 python-dotenv
 playwright
+requests
+beautifulsoup4
