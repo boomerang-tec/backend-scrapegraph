@@ -8,6 +8,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Garante que o Playwright instala o Chromium na pasta local do projeto
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+
 app = FastAPI()
 
 app.add_middleware(
@@ -32,7 +35,6 @@ def scrape_site(request: ScrapeRequest):
     if not api_key:
         raise HTTPException(status_code=500, detail="Chave OPENAI_API_KEY não configurada no servidor.")
 
-    # Se a entrada não for uma URL (http/https), transforma em busca no Google Maps
     if not request.url.startswith("http://") and not request.url.startswith("https://"):
         termo_busca = request.url.replace(" ", "+")
         source_url = f"https://www.google.com/maps/search/{termo_busca}"
@@ -57,10 +59,10 @@ def scrape_site(request: ScrapeRequest):
         result = smart_scraper.run()
         return {"success": True, "data": result}
     except Exception as e:
-        # Se falhar por falta do executável do Playwright, tenta instalar e reexecutar
+        # Se o executável do navegador não for encontrado, força a instalação imediata
         if "Executable doesn't exist" in str(e) or "playwright install" in str(e):
             try:
-                subprocess.run(["python", "-m", "playwright", "install", "chromium"], check=True)
+                subprocess.run(["playwright", "install", "chromium"], check=True)
                 smart_scraper = SmartScraperGraph(
                     prompt=request.prompt,
                     source=source_url,
@@ -69,6 +71,6 @@ def scrape_site(request: ScrapeRequest):
                 result = smart_scraper.run()
                 return {"success": True, "data": result}
             except Exception as retry_err:
-                raise HTTPException(status_code=500, detail=f"Erro ao instalar Playwright e rodar: {str(retry_err)}")
+                raise HTTPException(status_code=500, detail=f"Erro ao reinstalar Chromium: {str(retry_err)}")
         
         raise HTTPException(status_code=500, detail=str(e))
