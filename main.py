@@ -25,8 +25,9 @@ class ScrapeRequest(BaseModel):
 def home():
     return {"message": "API ScrapeGraphAI está online!"}
 
+# Nota: Removido o 'async' para o FastAPI gerenciar a chamada bloqueante em uma thread isolada
 @app.post("/scrape")
-async def scrape_site(request: ScrapeRequest):
+def scrape_site(request: ScrapeRequest):
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="Chave OPENAI_API_KEY não configurada no servidor.")
