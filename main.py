@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from scrapegraphai.graphs import SmartScraperGraph
-from googlesearch import search
+from duckduckgo_search import DDGS
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -37,21 +37,21 @@ def scrape_site(request: ScrapeRequest):
 
     targets = []
 
-    # ETAPA 1: Se for termo de busca/nicho, pesquisa no Google e obtém os links dos sites oficiais
+    # ETAPA 1: Se for termo de busca/nicho, busca no DuckDuckGo (sem risco de erro 429)
     if not request.url.startswith("http://") and not request.url.startswith("https://"):
         try:
-            # Busca os 3 primeiros sites reais no Google (evitando agregadores genéricos)
             query = f"{request.url} site oficial"
-            search_results = search(query, num_results=5, lang="pt")
-            
-            for url_found in search_results:
-                # Ignora redes sociais ou sites de busca genéricos
-                if not any(domain in url_found for domain in ["google.com", "instagram.com", "facebook.com", "linkedin.com", "youtube.com"]):
-                    targets.append(url_found)
-                if len(targets) >= 3: # Limita aos 3 primeiros sites para não estourar o tempo de resposta
-                    break
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=8))
+                
+                for r in results:
+                    url_found = r.get("href", "")
+                    if not any(domain in url_found for domain in ["google.com", "instagram.com", "facebook.com", "linkedin.com", "youtube.com", "duckduckgo.com"]):
+                        targets.append(url_found)
+                    if len(targets) >= 3:
+                        break
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Erro ao buscar sites no Google: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Erro ao buscar sites no mecanismo de busca: {str(e)}")
     else:
         targets.append(request.url)
 
@@ -95,7 +95,6 @@ def scrape_site(request: ScrapeRequest):
                     result["website"] = site_url
                 all_leads.append(result)
         except Exception as e:
-            # Caso falhe o navegador em algum site, tenta reinstalar Chromium se necessário
             if "Executable doesn't exist" in str(e) or "playwright install" in str(e):
                 subprocess.run(["playwright", "install", "chromium"], check=True)
                 smart_scraper = SmartScraperGraph(
