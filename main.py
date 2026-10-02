@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from scrapegraphai.graphs import SmartScraperGraph
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -37,38 +37,38 @@ def scrape_site(request: ScrapeRequest):
 
     targets = []
 
-    # ETAPA 1: Se for termo de busca/nicho, busca no DuckDuckGo (sem risco de erro 429)
+    # ETAPA 1: Se for termo de busca, busca URLs
     if not request.url.startswith("http://") and not request.url.startswith("https://"):
         try:
-            query = f"{request.url} site oficial"
-            with DDGS() as ddgs:
-                results = list(ddgs.text(query, max_results=8))
+            with DDGS() as ddgs_client:
+                # Busca direta
+                results = list(ddgs_client.text(request.url, max_results=10))
                 
                 for r in results:
                     url_found = r.get("href", "")
-                    if not any(domain in url_found for domain in ["google.com", "instagram.com", "facebook.com", "linkedin.com", "youtube.com", "duckduckgo.com"]):
+                    if not any(domain in url_found for domain in ["google.com", "instagram.com", "facebook.com", "linkedin.com", "youtube.com", "duckduckgo.com", "wikipedia.org"]):
                         targets.append(url_found)
                     if len(targets) >= 3:
                         break
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Erro ao buscar sites no mecanismo de busca: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Erro ao realizar busca: {str(e)}")
     else:
         targets.append(request.url)
 
     if not targets:
-        raise HTTPException(status_code=404, detail="Nenhum site oficial foi encontrado para este termo de busca.")
+        raise HTTPException(status_code=404, detail="Nenhum site oficial foi encontrado para o termo pesquisado.")
 
-    # ETAPA 2: Para cada site encontrado, roda o ScrapeGraphAI na URL
+    # ETAPA 2: Extração via ScrapeGraphAI
     all_leads = []
     
     prompt_detalhado = (
         f"{request.prompt}\n\n"
-        "Análise o site corporativo e extraia as seguintes informações no formato JSON:\n"
+        "Analise o site corporativo e extraia as seguintes informações no formato JSON:\n"
         "- nome_empresa: Nome oficial da empresa\n"
         "- telefone: Telefone fixo, celular ou WhatsApp de contato\n"
         "- email: E-mail corporativo ou de contato/atendimento encontrado no site\n"
         "- endereco: Endereço físico da empresa (rua, bairro, cidade)\n"
-        "- responsavel: Nome do diretor, fundador, sócio ou gestor (se mencionado na página sobre/equipe)\n"
+        "- responsavel: Nome do diretor, fundador, sócio ou gestor (se mencionado)\n"
         "- website: A própria URL do site que foi analisado\n"
         "Retorne APENAS um objeto JSON com esses campos."
     )
