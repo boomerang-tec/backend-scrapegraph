@@ -1,12 +1,12 @@
 import os
+import asyncio
 import urllib.parse
 import subprocess
-import requests
-from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from scrapegraphai.graphs import SmartScraperGraph
+from playwright.async_api import async_playwright
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -29,10 +29,10 @@ class ScrapeRequest(BaseModel):
 
 @app.get("/")
 def home():
-    return {"message": "API ScrapeGraphAI Online - Logs Ativos"}
+    return {"message": "API ScrapeGraphAI Online"}
 
-def buscar_urls_gratuitas(termo: str) -> list:
-    print(f"\n[ESTAGIO 1] Iniciando busca para o termo: '{termo}'", flush=True)
+async def buscar_urls_playwright_async(termo: str) -> list:
+    print(f"\n[ESTÁGIO 1] A iniciar pesquisa via Playwright para: '{termo}'", flush=True)
     targets = []
     dominios_ignorados = [
         "google.", "instagram.com", "facebook.com", "linkedin.com",
@@ -41,64 +41,65 @@ def buscar_urls_gratuitas(termo: str) -> list:
         "yellowpages.com", "guiamais.com.br", "apontador.com.br"
     ]
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
-    }
+    query_encoded = urllib.parse.quote_plus(termo)
+    search_url = f"https://html.duckduckgo.com/html/?q={query_encoded}"
 
-    try:
-        query_encoded = urllib.parse.quote_plus(f"{termo} site oficial")
-        url_busca = f"https://html.duckduckgo.com/html/?q={query_encoded}"
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
+        page = await context.new_page()
         
-        print(f"[ESTAGIO 1] Requisitando: {url_busca}", flush=True)
-        resp = requests.get(url_busca, headers=headers, timeout=12)
-        
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, "html.parser")
-            links = soup.find_all("a", class_="result__url")
+        try:
+            print(f"[ESTÁGIO 1] A navegar para a página de pesquisa...", flush=True)
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
             
-            for link in links:
-                href = link.get("href", "")
-                if "uddg=" in href:
-                    parsed = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
-                    real_url = parsed.get("uddg", [""])[0]
-                else:
-                    real_url = href
+            # Obtém os links dos resultados
+            elements = await page.query_selector_all("a.result__url")
+            for elem in elements:
+                href = await elem.get_attribute("href")
+                if href:
+                    if "uddg=" in href:
+                        parsed = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+                        real_url = parsed.get("uddg", [""])[0]
+                    else:
+                        real_url = href
 
-                if real_url and real_url.startswith("http") and not any(d in real_url for d in dominios_ignorados):
-                    if real_url not in targets:
-                        targets.append(real_url)
-                        print(f"   -> Site oficial encontrado: {real_url}", flush=True)
-                
-                if len(targets) >= 3:
-                    break
+                    if real_url and real_url.startswith("http") and not any(d in real_url for d in dominios_ignorados):
+                        if real_url not in targets:
+                            targets.append(real_url)
+                            print(f"   -> Site oficial encontrado: {real_url}", flush=True)
 
-    except Exception as err:
-        print(f"[ERRO ESTAGIO 1]: {str(err)}", flush=True)
+                    if len(targets) >= 3:
+                        break
+        except Exception as e:
+            print(f"[ERRO ESTÁGIO 1]: {str(e)}", flush=True)
+        finally:
+            await browser.close()
 
-    print(f"[ESTAGIO 1 FINALIADO] Total de URLs capturadas: {len(targets)}", flush=True)
+    print(f"[ESTÁGIO 1 FINALIZADO] URLs encontradas: {len(targets)}", flush=True)
     return targets
 
 @app.post("/scrape")
-def scrape_site(request: ScrapeRequest):
-    print(f"\n================ NOVA REQUISICAO /SCRAPE ================", flush=True)
-    print(f"Entrada informada pelo cliente: '{request.url}'", flush=True)
-    
+async def scrape_site(request: ScrapeRequest):
+    print(f"\n================ NOVA REQUISIÇÃO /SCRAPE ================", flush=True)
+    print(f"Entrada recebida: '{request.url}'", flush=True)
+
     openai_key = os.getenv("OPENAI_API_KEY")
     if not openai_key:
-        print("[ERRO CRITICO]: OPENAI_API_KEY ausente nas variaveis de ambiente!", flush=True)
+        print("[ERRO]: OPENAI_API_KEY não configurada!", flush=True)
         raise HTTPException(status_code=500, detail="Chave OPENAI_API_KEY não configurada no servidor.")
 
     targets = []
 
     if not request.url.startswith("http://") and not request.url.startswith("https://"):
-        targets = buscar_urls_gratuitas(request.url)
+        targets = await buscar_urls_playwright_async(request.url)
     else:
         targets.append(request.url)
 
     if not targets:
-        print("[FALHA]: Nenhuma URL valida capturada. Retornando 404.", flush=True)
+        print("[FALHA]: Nenhuma URL capturada no Estágio 1.", flush=True)
         raise HTTPException(status_code=404, detail="Nenhum site oficial foi encontrado para o termo pesquisado.")
 
     all_leads = []
@@ -124,35 +125,29 @@ def scrape_site(request: ScrapeRequest):
         "headless": True,
     }
 
-    print(f"[ESTAGIO 2] Processando {len(targets)} site(s) com ScrapeGraphAI...", flush=True)
+    print(f"[ESTÁGIO 2] A processar {len(targets)} site(s) com ScrapeGraphAI...", flush=True)
 
+    # Executa a raspagem síncrona dentro do loop num executor para não bloquear a thread
+    loop = asyncio.get_event_loop()
     for idx, site_url in enumerate(targets, 1):
-        print(f"   [{idx}/{len(targets)}] Extraindo dados de: {site_url}", flush=True)
-        try:
+        print(f"   [{idx}/{len(targets)}] A extrair dados de: {site_url}", flush=True)
+        
+        def run_scraper(url):
             smart_scraper = SmartScraperGraph(
                 prompt=prompt_detalhado,
-                source=site_url,
+                source=url,
                 config=graph_config
             )
-            result = smart_scraper.run()
+            return smart_scraper.run()
+
+        try:
+            result = await loop.run_in_executor(None, run_scraper, site_url)
             if result and isinstance(result, dict):
                 result["website"] = site_url
                 all_leads.append(result)
-                print(f"   [SUCESSO]: Dados raspados com sucesso de {site_url}", flush=True)
+                print(f"   [SUCESSO]: Dados extraídos de {site_url}", flush=True)
         except Exception as e:
             print(f"   [ERRO ao raspar {site_url}]: {str(e)}", flush=True)
-            if "Executable doesn't exist" in str(e) or "playwright install" in str(e):
-                print("   [Instalando Chromium via sub-processo...]", flush=True)
-                subprocess.run(["playwright", "install", "chromium"], check=True)
-                smart_scraper = SmartScraperGraph(
-                    prompt=prompt_detalhado,
-                    source=site_url,
-                    config=graph_config
-                )
-                result = smart_scraper.run()
-                if result and isinstance(result, dict):
-                    result["website"] = site_url
-                    all_leads.append(result)
 
-    print(f"================ REQUISICAO FINALIZADA (Leads: {len(all_leads)}) ================\n", flush=True)
+    print(f"================ REQUISIÇÃO FINALIZADA (Leads: {len(all_leads)}) ================\n", flush=True)
     return {"success": True, "total": len(all_leads), "leads": all_leads}
